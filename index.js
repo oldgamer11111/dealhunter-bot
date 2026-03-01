@@ -7,20 +7,17 @@ const {
   Routes
 } = require("discord.js");
 const axios = require("axios");
-const fs = require("fs");
 
 const client = new Client({
   intents: [GatewayIntentBits.Guilds]
 });
 
-const DATA_FILE = "./settings.json";
-let settings = fs.existsSync(DATA_FILE)
-  ? JSON.parse(fs.readFileSync(DATA_FILE))
-  : {};
-
-function saveSettings() {
-  fs.writeFileSync(DATA_FILE, JSON.stringify(settings, null, 2));
-}
+// 🔥 YOUR CHANNEL IDS
+const CHANNELS = {
+  steam: "1320282654209478666",
+  ps: "1320275990290890826",
+  xbox: "1320275990290890827"
+};
 
 const STORES = {
   steam: 1,
@@ -28,25 +25,13 @@ const STORES = {
   xbox: 25
 };
 
-// Slash commands
+let sentDeals = new Set();
+
+// 🔥 Slash Commands
 const commands = [
   new SlashCommandBuilder()
-    .setName("setchannel")
-    .setDescription("Set this channel for platform alerts")
-    .addStringOption(option =>
-      option.setName("platform")
-        .setDescription("steam / ps / xbox")
-        .setRequired(true)
-        .addChoices(
-          { name: "steam", value: "steam" },
-          { name: "ps", value: "ps" },
-          { name: "xbox", value: "xbox" }
-        )
-    ),
-
-  new SlashCommandBuilder()
     .setName("check")
-    .setDescription("Check deals manually")
+    .setDescription("Check 70%+ deals")
     .addStringOption(option =>
       option.setName("platform")
         .setDescription("steam / ps / xbox")
@@ -60,7 +45,7 @@ const commands = [
 ].map(cmd => cmd.toJSON());
 
 client.once("ready", async () => {
-  console.log("Bot Online");
+  console.log("🚀 Deal Hunter Online");
 
   const rest = new REST({ version: "10" }).setToken(process.env.TOKEN);
 
@@ -69,7 +54,7 @@ client.once("ready", async () => {
     { body: commands }
   );
 
-  console.log("Slash Commands Ready");
+  console.log("✅ Slash Commands Registered");
 
   setInterval(runAutoCheck, 3600000);
   runAutoCheck();
@@ -80,21 +65,14 @@ client.on("interactionCreate", async interaction => {
 
   const platform = interaction.options.getString("platform");
 
-  if (interaction.commandName === "setchannel") {
-    settings[platform] = interaction.channelId;
-    saveSettings();
-    return interaction.reply(`✅ ${platform.toUpperCase()} alerts set in this channel.`);
-  }
-
   if (interaction.commandName === "check") {
     await interaction.deferReply();
     await fetchDeals(platform, true);
-    return interaction.editReply("✅ Deals sent.");
+    return interaction.editReply("✅ Deals check completed.");
   }
 });
 
-let sentDeals = new Set();
-
+// 🔥 LIVE INR RATE
 async function getINRRate() {
   try {
     const res = await axios.get("https://api.exchangerate-api.com/v4/latest/USD");
@@ -104,15 +82,16 @@ async function getINRRate() {
   }
 }
 
+// 🔥 AUTO CHECK
 async function runAutoCheck() {
-  for (let platform of Object.keys(settings)) {
+  console.log("⏳ Running hourly deal check...");
+  for (let platform of Object.keys(CHANNELS)) {
     await fetchDeals(platform, false);
   }
 }
 
+// 🔥 FETCH DEALS
 async function fetchDeals(platform, manual) {
-  if (!settings[platform]) return;
-
   try {
     const response = await axios.get(
       `https://www.cheapshark.com/api/1.0/deals?storeID=${STORES[platform]}&upperPrice=100`
@@ -122,16 +101,18 @@ async function fetchDeals(platform, manual) {
       parseFloat(game.savings) >= 70
     );
 
-    if (!deals.length) return;
+    if (!deals.length) {
+      console.log(`No deals for ${platform}`);
+      return;
+    }
 
-    const channel = await client.channels.fetch(settings[platform]);
+    const channel = await client.channels.fetch(CHANNELS[platform]);
     const rate = await getINRRate();
 
     for (let game of deals) {
-      const id = game.dealID;
-      if (!manual && sentDeals.has(id)) continue;
 
-      sentDeals.add(id);
+      if (!manual && sentDeals.has(game.dealID)) continue;
+      sentDeals.add(game.dealID);
 
       const usd = parseFloat(game.salePrice);
       const inr = Math.round(usd * rate);
@@ -145,7 +126,9 @@ async function fetchDeals(platform, manual) {
           { name: "USD", value: `$${usd}`, inline: true },
           { name: "INR", value: `₹${inr}`, inline: true }
         )
-        .setColor(discount >= 90 ? 0xff0000 : 0x00AEFF);
+        .setColor(discount >= 90 ? 0xff0000 : 0x00AEFF)
+        .setFooter({ text: "Deal Hunter Pro" })
+        .setTimestamp();
 
       if (discount >= 90) {
         await channel.send("🚨 **90%+ MEGA DEAL ALERT!** 🚨");
@@ -154,8 +137,10 @@ async function fetchDeals(platform, manual) {
       await channel.send({ embeds: [embed] });
     }
 
+    console.log(`Sent deals for ${platform}`);
+
   } catch (err) {
-    console.error(err);
+    console.error(`Error fetching ${platform}:`, err.message);
   }
 }
 
