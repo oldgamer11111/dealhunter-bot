@@ -16,33 +16,32 @@ const client = new Client({
 
 const TOKEN = process.env.TOKEN;
 
-/* ================= MEMORY ================= */
+/* ================= STORAGE ================= */
 
-let guildChannels = {}; // { guildId: channelId }
-let sentDeals = {};     // { guildId: Set(dealIDs) }
+const guildConfig = {};   // { guildId: { channelId, sent:Set } }
 
 /* ================= COMMAND ================= */
 
 const commands = [
   new SlashCommandBuilder()
     .setName("setup")
-    .setDescription("Set the channel for Steam 70%+ deals")
+    .setDescription("Set Steam 70%+ deal channel")
     .addChannelOption(option =>
       option.setName("channel")
         .setDescription("Channel to send deals")
         .setRequired(true)
     )
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
-].map(cmd => cmd.toJSON());
+].map(c => c.toJSON());
 
 /* ================= READY ================= */
 
 client.once("ready", async () => {
-  console.log("Steam 70%+ CheapShark Tracker Online");
+  console.log("🔥 Ultimate Steam Deal Bot Online");
 
   const rest = new REST({ version: "10" }).setToken(TOKEN);
 
-  // 🔴 REPLACE WITH YOUR SERVER ID
+  // 🔴 CHANGE THIS TO YOUR SERVER ID
   await rest.put(
     Routes.applicationGuildCommands(
       client.user.id,
@@ -51,9 +50,8 @@ client.once("ready", async () => {
     { body: commands }
   );
 
-  await sendDealsToAllGuilds();
-
-  setInterval(refreshAllGuilds, 43200000); // 12 hours
+  await sendAllGuilds();
+  setInterval(refreshAllGuilds, 43200000); // 12h
 });
 
 /* ================= INTERACTION ================= */
@@ -65,103 +63,123 @@ client.on("interactionCreate", async interaction => {
     const guildId = interaction.guildId;
     const channel = interaction.options.getChannel("channel");
 
-    guildChannels[guildId] = channel.id;
-    sentDeals[guildId] = new Set();
+    guildConfig[guildId] = {
+      channelId: channel.id,
+      sent: new Set()
+    };
 
-    await interaction.reply("✅ Channel saved. Sending 70%+ Steam deals now...");
-    await sendDealsForGuild(guildId);
+    await interaction.reply("✅ Channel saved. Sending deals now...");
+    await sendDeals(guildId);
   }
 });
 
-/* ================= MAIN FUNCTIONS ================= */
+/* ================= CORE ENGINE ================= */
 
-async function sendDealsToAllGuilds() {
-  for (let guildId of Object.keys(guildChannels)) {
-    await sendDealsForGuild(guildId);
+async function fetchSteamDeals() {
+
+  let allDeals = [];
+
+  // Check 5 pages (300 deals)
+  for (let page = 0; page < 5; page++) {
+
+    const res = await axios.get(
+      `https://www.cheapshark.com/api/1.0/deals?storeID=1&pageSize=60&pageNumber=${page}`
+    );
+
+    allDeals.push(...res.data);
+  }
+
+  // Filter 70%+
+  const filtered = allDeals.filter(d =>
+    parseFloat(d.savings) >= 70
+  );
+
+  // Sort highest discount first
+  filtered.sort((a, b) =>
+    parseFloat(b.savings) - parseFloat(a.savings)
+  );
+
+  return filtered;
+}
+
+async function sendAllGuilds() {
+  for (const guildId in guildConfig) {
+    await sendDeals(guildId);
   }
 }
 
 async function refreshAllGuilds() {
-  for (let guildId of Object.keys(guildChannels)) {
 
-    const channelId = guildChannels[guildId];
-    if (!channelId) continue;
+  console.log("🔄 12h refresh running");
 
-    try {
-      const channel = await client.channels.fetch(channelId);
+  for (const guildId in guildConfig) {
 
-      await channel.bulkDelete(100).catch(() => {});
-      sentDeals[guildId] = new Set();
+    const config = guildConfig[guildId];
+    if (!config) continue;
 
-      await sendDealsForGuild(guildId);
+    const channel = await client.channels.fetch(config.channelId);
+    if (!channel) continue;
 
-    } catch (err) {
-      console.error("Refresh error:", err.message);
-    }
+    await channel.bulkDelete(100).catch(() => {});
+
+    config.sent = new Set();
+
+    await sendDeals(guildId);
   }
 }
 
-async function sendDealsForGuild(guildId) {
+async function sendDeals(guildId) {
 
-  const channelId = guildChannels[guildId];
-  if (!channelId) return;
+  const config = guildConfig[guildId];
+  if (!config) return;
+
+  const channel = await client.channels.fetch(config.channelId);
+  if (!channel) return;
 
   try {
-    const channel = await client.channels.fetch(channelId);
-    if (!channel) return;
 
-    // CheapShark Steam deals (storeID=1 is Steam)
-    const res = await axios.get(
-      "https://www.cheapshark.com/api/1.0/deals?storeID=1&upperPrice=100&pageSize=60"
-    );
+    const deals = await fetchSteamDeals();
 
-    let deals = res.data;
+    console.log("Total 70%+ deals found:", deals.length);
 
-    // Filter 70%+
-    deals = deals.filter(deal => parseFloat(deal.savings) >= 50);
+    let sentCount = 0;
 
-    // Sort highest discount first
-    deals.sort((a, b) => parseFloat(b.savings) - parseFloat(a.savings));
+    for (const deal of deals) {
 
-    let count = 0;
+      if (sentCount >= 10) break;
 
-    for (let deal of deals) {
-
-      if (count >= 100) break;
-
-      if (sentDeals[guildId] && sentDeals[guildId].has(deal.dealID)) continue;
+      if (config.sent.has(deal.dealID)) continue;
 
       const discount = parseFloat(deal.savings).toFixed(0);
       const original = deal.normalPrice;
       const final = deal.salePrice;
       const inr = Math.round(final * 83);
 
-      const steamLink = `https://store.steampowered.com/app/${deal.steamAppID}`;
-      const image = deal.thumb;
-
       const embed = new EmbedBuilder()
         .setTitle(`🔥 ${deal.title}`)
-        .setURL(steamLink)
-        .setImage(image)
+        .setURL(`https://store.steampowered.com/app/${deal.steamAppID}`)
+        .setImage(deal.thumb)
         .addFields(
           { name: "Discount", value: `${discount}%`, inline: true },
-          { name: "Original Price", value: `$${original}`, inline: true },
+          { name: "Original", value: `$${original}`, inline: true },
           { name: "Now", value: `$${final}`, inline: true },
           { name: "INR", value: `₹${inr}`, inline: true }
         )
         .setColor(discount >= 90 ? 0xff0000 : 0x00AEFF)
-        .setFooter({ text: "Steam 70%+ Deals (CheapShark)" });
+        .setFooter({ text: "Steam 70–100% Mega Deals" });
 
       await channel.send({ embeds: [embed] });
 
-      if (!sentDeals[guildId]) sentDeals[guildId] = new Set();
-      sentDeals[guildId].add(deal.dealID);
+      config.sent.add(deal.dealID);
+      sentCount++;
+    }
 
-      count++;
+    if (sentCount === 0) {
+      await channel.send("⚠️ No 70%+ Steam deals found right now.");
     }
 
   } catch (err) {
-    console.error("Deal fetch error:", err.message);
+    console.error("Deal error:", err.message);
   }
 }
 
