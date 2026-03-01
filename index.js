@@ -11,14 +11,14 @@ const axios = require("axios");
 const fs = require("fs");
 
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers]
+  intents: [GatewayIntentBits.Guilds]
 });
 
-const DATA_FILE = "./settings.json";
+const DATA_FILE = "./data.json";
 
 let data = fs.existsSync(DATA_FILE)
   ? JSON.parse(fs.readFileSync(DATA_FILE))
-  : { channels: {}, notify: [] };
+  : { channels: {} };
 
 function saveData() {
   fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2));
@@ -33,7 +33,7 @@ const STORES = {
 const commands = [
   new SlashCommandBuilder()
     .setName("setchannel")
-    .setDescription("Set alert channel")
+    .setDescription("Set this channel for platform alerts")
     .addStringOption(option =>
       option.setName("platform")
         .setDescription("steam / ps / xbox")
@@ -47,7 +47,7 @@ const commands = [
 
   new SlashCommandBuilder()
     .setName("check")
-    .setDescription("Manual deal check")
+    .setDescription("Check deals manually")
     .addStringOption(option =>
       option.setName("platform")
         .setDescription("steam / ps / xbox")
@@ -57,20 +57,6 @@ const commands = [
           { name: "ps", value: "ps" },
           { name: "xbox", value: "xbox" }
         )
-    ),
-
-  new SlashCommandBuilder()
-    .setName("notifyme")
-    .setDescription("Get DM when game hits discount")
-    .addStringOption(option =>
-      option.setName("game")
-        .setDescription("Game name")
-        .setRequired(true)
-    )
-    .addIntegerOption(option =>
-      option.setName("discount")
-        .setDescription("Discount percentage")
-        .setRequired(true)
     )
 ].map(cmd => cmd.toJSON());
 
@@ -86,10 +72,11 @@ client.once("ready", async () => {
 
   console.log("Slash Commands Registered");
 
-  setInterval(runAutoCheck, 3600000); // hourly
-  setInterval(refreshAllChannels, 43200000); // every 12h
+  // When bot starts → send fresh deals
+  await sendAllDeals();
 
-  runAutoCheck();
+  // Every hour check
+  setInterval(sendAllDeals, 3600000);
 });
 
 client.on("interactionCreate", async interaction => {
@@ -100,70 +87,40 @@ client.on("interactionCreate", async interaction => {
   if (interaction.commandName === "setchannel") {
     data.channels[platform] = interaction.channelId;
     saveData();
-    return interaction.reply(`✅ ${platform.toUpperCase()} alerts set here.`);
+    return interaction.reply(`✅ ${platform.toUpperCase()} channel saved.`);
   }
 
   if (interaction.commandName === "check") {
     await interaction.deferReply();
-    await fetchDeals(platform, true);
+    await sendDeals(platform, true);
     return interaction.editReply("✅ Deals sent.");
-  }
-
-  if (interaction.commandName === "notifyme") {
-    const game = interaction.options.getString("game").toLowerCase();
-    const discount = interaction.options.getInteger("discount");
-
-    data.notify.push({
-      user: interaction.user.id,
-      game,
-      discount
-    });
-
-    saveData();
-
-    return interaction.reply(`🔔 You’ll be notified when ${game} hits ${discount}%+`);
   }
 });
 
-async function getINRRate() {
-  try {
-    const res = await axios.get("https://api.exchangerate-api.com/v4/latest/USD");
-    return res.data.rates.INR;
-  } catch {
-    return 83;
-  }
-}
-
 let sentDeals = new Set();
 
-async function runAutoCheck() {
+async function sendAllDeals() {
   for (let platform of Object.keys(data.channels)) {
-    await fetchDeals(platform, false);
+    await sendDeals(platform, false);
   }
 }
 
-async function refreshAllChannels() {
-  for (let platform of Object.keys(data.channels)) {
-    const channel = await client.channels.fetch(data.channels[platform]);
-    await channel.bulkDelete(100).catch(() => {});
-    await fetchDeals(platform, true);
-  }
-}
-
-async function fetchDeals(platform, manual) {
+async function sendDeals(platform, manual) {
   if (!data.channels[platform]) return;
 
   try {
     const response = await axios.get(
-      `https://www.cheapshark.com/api/1.0/deals?storeID=${STORES[platform]}&upperPrice=100`
+      `https://www.cheapshark.com/api/1.0/deals?storeID=${STORES[platform]}`
     );
 
-    const deals = response.data.filter(
-      game => parseFloat(game.savings) >= 70
-    );
+    if (!response.data.length) return;
 
     const channel = await client.channels.fetch(data.channels[platform]);
-    const rate = await getINRRate();
+
+    // Sort by biggest discount
+    const deals = response.data
+      .sort((a, b) => parseFloat(b.savings) - parseFloat(a.savings))
+      .slice(0, 10);
 
     for (let game of deals) {
       const id = game.dealID;
@@ -171,16 +128,14 @@ async function fetchDeals(platform, manual) {
 
       sentDeals.add(id);
 
-      const usd = parseFloat(game.salePrice);
-      const inr = Math.round(usd * rate);
       const discount = parseFloat(game.savings);
+      const usd = parseFloat(game.salePrice);
+      const inr = Math.round(usd * 83);
 
       const embed = new EmbedBuilder()
         .setTitle(`🔥 ${game.title}`)
         .setURL(`https://www.cheapshark.com/redirect?dealID=${game.dealID}`)
-        .setThumbnail(
-          game.thumb
-        )
+        .setThumbnail(game.thumb)
         .addFields(
           { name: "Platform", value: platform.toUpperCase(), inline: true },
           { name: "Discount", value: `${discount}%`, inline: true },
@@ -188,26 +143,13 @@ async function fetchDeals(platform, manual) {
           { name: "INR", value: `₹${inr}`, inline: true }
         )
         .setColor(discount >= 90 ? 0xff0000 : 0x00AEFF)
-        .setFooter({ text: "Deal Hunter Pro" });
+        .setFooter({ text: "Deal Tracker Bot" });
 
       if (discount >= 90) {
         await channel.send("🚨 90%+ MEGA DEAL 🚨");
       }
 
       await channel.send({ embeds: [embed] });
-
-      // Notify users
-      for (let n of data.notify) {
-        if (
-          game.title.toLowerCase().includes(n.game) &&
-          discount >= n.discount
-        ) {
-          const user = await client.users.fetch(n.user);
-          await user.send(
-            `🔔 ${game.title} is now ${discount}% OFF!\n$${usd} | ₹${inr}`
-          );
-        }
-      }
     }
 
   } catch (err) {
