@@ -60,6 +60,9 @@ client.once("ready", async () => {
   ),
   { body: commands }
 );
+
+  await checkAllGuilds();
+  
   setInterval(checkAllGuilds, 3600000); // 1 hour
   setInterval(sendDailySummary, 86400000); // 24 hours
 });
