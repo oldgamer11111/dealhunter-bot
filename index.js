@@ -18,11 +18,10 @@ const TOKEN = process.env.TOKEN;
 
 /* ================= MEMORY ================= */
 
-let guildConfig = {};     // { guildId: { channelId, category } }
-let sentDeals = {};       // { guildId: { appId: timestamp } }
-let dailyTracker = {};    // { guildId: [ {name, discount} ] }
+let guildChannels = {}; 
+// { guildId: channelId }
 
-/* ================= COMMANDS ================= */
+/* ================= COMMAND ================= */
 
 const commands = [
   new SlashCommandBuilder()
@@ -33,38 +32,30 @@ const commands = [
         .setDescription("Channel to send deals")
         .setRequired(true)
     )
-    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
-
-  new SlashCommandBuilder()
-    .setName("setcategory")
-    .setDescription("Filter by category (rpg, action, strategy etc.)")
-    .addStringOption(o =>
-      o.setName("type")
-        .setDescription("Category name")
-        .setRequired(true)
-    )
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
-
 ].map(c => c.toJSON());
 
 /* ================= READY ================= */
 
 client.once("ready", async () => {
-  console.log("Steam Multi-Server Bot Online");
+  console.log("Steam Deal Bot Online");
 
   const rest = new REST({ version: "10" }).setToken(TOKEN);
-  await rest.put(
-  Routes.applicationGuildCommands(
-    client.user.id,
-    "1320275989011632213"
-  ),
-  { body: commands }
-);
 
-  await checkAllGuilds();
-  
-  setInterval(checkAllGuilds, 3600000); // 1 hour
-  setInterval(sendDailySummary, 86400000); // 24 hours
+  // 🔥 IMPORTANT: replace YOUR_SERVER_ID with your real server id
+  await rest.put(
+    Routes.applicationGuildCommands(
+      client.user.id,
+      "1320275989011632213"
+    ),
+    { body: commands }
+  );
+
+  // Send deals on start
+  await sendDealsToAllGuilds();
+
+  // Every 12 hours refresh
+  setInterval(refreshAllGuilds, 43200000);
 });
 
 /* ================= INTERACTION ================= */
@@ -72,94 +63,67 @@ client.once("ready", async () => {
 client.on("interactionCreate", async interaction => {
   if (!interaction.isChatInputCommand()) return;
 
-  const guildId = interaction.guildId;
-
   if (interaction.commandName === "setup") {
+    const guildId = interaction.guildId;
     const channel = interaction.options.getChannel("channel");
 
-    guildConfig[guildId] = guildConfig[guildId] || {};
-    guildConfig[guildId].channelId = channel.id;
+    guildChannels[guildId] = channel.id;
 
-    await interaction.reply("✅ Deal channel set successfully.");
-  }
+    await interaction.reply("✅ Deal channel saved. Sending deals now...");
 
-  if (interaction.commandName === "setcategory") {
-    const type = interaction.options.getString("type").toLowerCase();
-
-    guildConfig[guildId] = guildConfig[guildId] || {};
-    guildConfig[guildId].category = type;
-
-    await interaction.reply(`✅ Category filter set to "${type}"`);
+    // 🔥 Immediately send deals after setup
+    await sendDealsForGuild(guildId);
   }
 });
 
-/* ================= MAIN LOGIC ================= */
+/* ================= DEAL LOGIC ================= */
 
-async function checkAllGuilds() {
-  for (let guildId of Object.keys(guildConfig)) {
+async function sendDealsToAllGuilds() {
+  for (let guildId of Object.keys(guildChannels)) {
     await sendDealsForGuild(guildId);
   }
 }
 
+async function refreshAllGuilds() {
+  for (let guildId of Object.keys(guildChannels)) {
+    const channelId = guildChannels[guildId];
+    if (!channelId) continue;
+
+    try {
+      const channel = await client.channels.fetch(channelId);
+
+      // Clear last 100 messages
+      await channel.bulkDelete(100).catch(() => {});
+
+      await sendDealsForGuild(guildId);
+    } catch (err) {
+      console.error("Refresh error:", err.message);
+    }
+  }
+}
+
 async function sendDealsForGuild(guildId) {
-  const config = guildConfig[guildId];
-  if (!config || !config.channelId) return;
+  const channelId = guildChannels[guildId];
+  if (!channelId) return;
 
   try {
-    const featured = await axios.get(
+    const res = await axios.get(
       "https://store.steampowered.com/api/featuredcategories/"
     );
 
-    const deals = featured.data.specials.items
+    const deals = res.data.specials.items
       .sort((a, b) => b.discount_percent - a.discount_percent)
       .slice(0, 10);
 
-    const channel = await client.channels.fetch(config.channelId);
+    const channel = await client.channels.fetch(channelId);
     if (!channel) return;
 
-    sentDeals[guildId] = sentDeals[guildId] || {};
-    dailyTracker[guildId] = dailyTracker[guildId] || [];
-
     for (let game of deals) {
-
-      const now = Date.now();
-      const lastSent = sentDeals[guildId][game.id];
-
-      if (lastSent && now - lastSent < 86400000) continue; // 24h duplicate
-
-      // Fetch detailed info
-      const detailRes = await axios.get(
-        `https://store.steampowered.com/api/appdetails?appids=${game.id}`
-      );
-
-      const appData = detailRes.data[game.id];
-
-      if (!appData.success) continue;
-
-      const data = appData.data;
-
-      // CATEGORY FILTER
-      if (config.category && data.genres) {
-        const match = data.genres.some(g =>
-          g.description.toLowerCase().includes(config.category)
-        );
-        if (!match) continue;
-      }
 
       const discount = game.discount_percent;
       const original = (game.original_price / 100).toFixed(2);
       const final = (game.final_price / 100).toFixed(2);
-
-      // REVIEW INFO
-      let reviewPercent = 0;
-      let reviewText = "No reviews";
-
-      if (data.recommendations && data.metacritic) {
-        reviewPercent = data.metacritic.score;
-        reviewText = "Metacritic";
-      }
-
-      const ratingBar = generateBar(reviewPercent);
+      const inr = Math.round(final * 83);
 
       const embed = new EmbedBuilder()
         .setTitle(`🔥 ${game.name}`)
@@ -169,60 +133,17 @@ async function sendDealsForGuild(guildId) {
           { name: "Discount", value: `${discount}%`, inline: true },
           { name: "Original", value: `$${original}`, inline: true },
           { name: "Now", value: `$${final}`, inline: true },
-          { name: "Rating", value: `${reviewText} (${reviewPercent})` },
-          { name: "Visual", value: ratingBar }
+          { name: "INR", value: `₹${inr}`, inline: true }
         )
-        .setColor(discount >= 90 ? 0xff0000 : 0x00AEFF);
+        .setColor(discount >= 90 ? 0xff0000 : 0x00AEFF)
+        .setFooter({ text: "Steam Deal Tracker" });
 
       await channel.send({ embeds: [embed] });
-
-      sentDeals[guildId][game.id] = now;
-      dailyTracker[guildId].push({
-        name: game.name,
-        discount
-      });
     }
 
   } catch (err) {
-    console.error("ERROR:", err.message);
+    console.error("Deal fetch error:", err.message);
   }
-}
-
-/* ================= DAILY SUMMARY ================= */
-
-async function sendDailySummary() {
-  for (let guildId of Object.keys(dailyTracker)) {
-
-    const config = guildConfig[guildId];
-    if (!config || !config.channelId) continue;
-
-    const channel = await client.channels.fetch(config.channelId);
-    if (!channel) continue;
-
-    const top5 = dailyTracker[guildId]
-      .sort((a, b) => b.discount - a.discount)
-      .slice(0, 5);
-
-    if (!top5.length) continue;
-
-    let summary = "📊 **Daily Top 5 Steam Deals**\n\n";
-
-    top5.forEach((g, i) => {
-      summary += `#${i + 1} ${g.name} - ${g.discount}% OFF\n`;
-    });
-
-    await channel.send(summary);
-
-    dailyTracker[guildId] = [];
-  }
-}
-
-/* ================= HELPER ================= */
-
-function generateBar(percent) {
-  const total = 10;
-  const filled = Math.round((percent / 100) * total);
-  return "█".repeat(filled) + "░".repeat(total - filled);
 }
 
 /* ================= START ================= */
