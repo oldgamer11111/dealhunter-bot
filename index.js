@@ -1,53 +1,155 @@
-const { Client, GatewayIntentBits, EmbedBuilder } = require('discord.js');
-const axios = require('axios');
+const {
+  Client,
+  GatewayIntentBits,
+  EmbedBuilder,
+  SlashCommandBuilder,
+  REST,
+  Routes
+} = require("discord.js");
+const axios = require("axios");
+const fs = require("fs");
 
 const client = new Client({
   intents: [GatewayIntentBits.Guilds]
 });
 
-const USD_TO_INR = 83;
+const DATA_FILE = "./settings.json";
+let settings = fs.existsSync(DATA_FILE)
+  ? JSON.parse(fs.readFileSync(DATA_FILE))
+  : {};
 
-// Store IDs
+function saveSettings() {
+  fs.writeFileSync(DATA_FILE, JSON.stringify(settings, null, 2));
+}
+
 const STORES = {
   steam: 1,
   ps: 7,
   xbox: 25
 };
 
-// Channel IDs (PUT YOUR CHANNEL IDS HERE)
-const CHANNELS = {
-  steam: "STEAM_CHANNEL_ID",
-  ps: "PS_CHANNEL_ID",
-  xbox: "XBOX_CHANNEL_ID"
-};
+// Slash commands
+const commands = [
+  new SlashCommandBuilder()
+    .setName("setchannel")
+    .setDescription("Set this channel for platform alerts")
+    .addStringOption(option =>
+      option.setName("platform")
+        .setDescription("steam / ps / xbox")
+        .setRequired(true)
+        .addChoices(
+          { name: "steam", value: "steam" },
+          { name: "ps", value: "ps" },
+          { name: "xbox", value: "xbox" }
+        )
+    ),
 
-async function checkDeals(platform) {
+  new SlashCommandBuilder()
+    .setName("check")
+    .setDescription("Check deals manually")
+    .addStringOption(option =>
+      option.setName("platform")
+        .setDescription("steam / ps / xbox")
+        .setRequired(true)
+        .addChoices(
+          { name: "steam", value: "steam" },
+          { name: "ps", value: "ps" },
+          { name: "xbox", value: "xbox" }
+        )
+    )
+].map(cmd => cmd.toJSON());
+
+client.once("ready", async () => {
+  console.log("Bot Online");
+
+  const rest = new REST({ version: "10" }).setToken(process.env.TOKEN);
+
+  await rest.put(
+    Routes.applicationCommands(client.user.id),
+    { body: commands }
+  );
+
+  console.log("Slash Commands Ready");
+
+  setInterval(runAutoCheck, 3600000);
+  runAutoCheck();
+});
+
+client.on("interactionCreate", async interaction => {
+  if (!interaction.isChatInputCommand()) return;
+
+  const platform = interaction.options.getString("platform");
+
+  if (interaction.commandName === "setchannel") {
+    settings[platform] = interaction.channelId;
+    saveSettings();
+    return interaction.reply(`✅ ${platform.toUpperCase()} alerts set in this channel.`);
+  }
+
+  if (interaction.commandName === "check") {
+    await interaction.deferReply();
+    await fetchDeals(platform, true);
+    return interaction.editReply("✅ Deals sent.");
+  }
+});
+
+let sentDeals = new Set();
+
+async function getINRRate() {
+  try {
+    const res = await axios.get("https://api.exchangerate-api.com/v4/latest/USD");
+    return res.data.rates.INR;
+  } catch {
+    return 83;
+  }
+}
+
+async function runAutoCheck() {
+  for (let platform of Object.keys(settings)) {
+    await fetchDeals(platform, false);
+  }
+}
+
+async function fetchDeals(platform, manual) {
+  if (!settings[platform]) return;
+
   try {
     const response = await axios.get(
       `https://www.cheapshark.com/api/1.0/deals?storeID=${STORES[platform]}&upperPrice=100`
     );
 
-    const deals = response.data.filter(
-      game => parseFloat(game.savings) >= 70
+    const deals = response.data.filter(game =>
+      parseFloat(game.savings) >= 70
     );
 
     if (!deals.length) return;
 
-    const channel = await client.channels.fetch(CHANNELS[platform]);
+    const channel = await client.channels.fetch(settings[platform]);
+    const rate = await getINRRate();
 
-    for (let game of deals.slice(0, 5)) {
+    for (let game of deals) {
+      const id = game.dealID;
+      if (!manual && sentDeals.has(id)) continue;
+
+      sentDeals.add(id);
+
       const usd = parseFloat(game.salePrice);
-      const inr = Math.round(usd * USD_TO_INR);
+      const inr = Math.round(usd * rate);
+      const discount = parseFloat(game.savings);
 
       const embed = new EmbedBuilder()
         .setTitle(`🔥 ${game.title}`)
         .addFields(
           { name: "Platform", value: platform.toUpperCase(), inline: true },
-          { name: "Discount", value: `${game.savings}%`, inline: true },
-          { name: "Price (USD)", value: `$${usd}`, inline: true },
-          { name: "Price (INR)", value: `₹${inr}`, inline: true }
+          { name: "Discount", value: `${discount}%`, inline: true },
+          { name: "USD", value: `$${usd}`, inline: true },
+          { name: "INR", value: `₹${inr}`, inline: true }
         )
-        .setColor(0x00AEFF);
+        .setColor(discount >= 90 ? 0xff0000 : 0x00AEFF);
+
+      if (discount >= 90) {
+        await channel.send("🚨 **90%+ MEGA DEAL ALERT!** 🚨");
+      }
 
       await channel.send({ embeds: [embed] });
     }
@@ -56,21 +158,5 @@ async function checkDeals(platform) {
     console.error(err);
   }
 }
-
-client.once("ready", () => {
-  console.log("Bot is online!");
-
-  // Check every 1 hour
-  setInterval(() => {
-    checkDeals("steam");
-    checkDeals("ps");
-    checkDeals("xbox");
-  }, 3600000);
-
-  // Run immediately when bot starts
-  checkDeals("steam");
-  checkDeals("ps");
-  checkDeals("xbox");
-});
 
 client.login(process.env.TOKEN);
