@@ -123,7 +123,7 @@ async function sendDealsForGuild(guildId) {
 
     for (let game of deals) {
 
-      if (count >= 10) break;
+      if (count >= 100) break;
 
       const discount = game.discount_percent;
 
