@@ -118,7 +118,7 @@ async function sendDealsForGuild(guildId) {
     let deals = res.data;
 
     // Filter 70%+
-    deals = deals.filter(deal => parseFloat(deal.savings) >= 70);
+    deals = deals.filter(deal => parseFloat(deal.savings) >= 50);
 
     // Sort highest discount first
     deals.sort((a, b) => parseFloat(b.savings) - parseFloat(a.savings));
@@ -127,7 +127,7 @@ async function sendDealsForGuild(guildId) {
 
     for (let deal of deals) {
 
-      if (count >= 10) break;
+      if (count >= 100) break;
 
       if (sentDeals[guildId] && sentDeals[guildId].has(deal.dealID)) continue;
 
