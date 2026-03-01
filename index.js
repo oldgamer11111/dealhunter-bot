@@ -18,31 +18,31 @@ const TOKEN = process.env.TOKEN;
 
 /* ================= MEMORY ================= */
 
-let guildChannels = {};       // { guildId: channelId }
-let sentDeals = {};           // { guildId: Set(appIds) }
+let guildChannels = {};     // { guildId: channelId }
+let sentDeals = {};         // { guildId: Set(appIds) }
 
 /* ================= COMMANDS ================= */
 
 const commands = [
   new SlashCommandBuilder()
     .setName("setup")
-    .setDescription("Set the channel for Steam 70%+ quality deals")
+    .setDescription("Set the channel for Steam 70%+ deals")
     .addChannelOption(option =>
       option.setName("channel")
-        .setDescription("Channel for deals")
+        .setDescription("Channel to send deals")
         .setRequired(true)
     )
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
-].map(c => c.toJSON());
+].map(cmd => cmd.toJSON());
 
 /* ================= READY ================= */
 
 client.once("ready", async () => {
-  console.log("Steam 70%+ Quality Tracker Online");
+  console.log("Steam 70%+ Search Tracker Online");
 
   const rest = new REST({ version: "10" }).setToken(TOKEN);
 
-  // 🔴 REPLACE THIS WITH YOUR SERVER ID
+  // 🔴 REPLACE WITH YOUR SERVER ID
   await rest.put(
     Routes.applicationGuildCommands(
       client.user.id,
@@ -51,7 +51,7 @@ client.once("ready", async () => {
     { body: commands }
   );
 
-  // Send deals on startup
+  // Send on startup
   await sendDealsToAllGuilds();
 
   // Refresh every 12 hours
@@ -70,7 +70,7 @@ client.on("interactionCreate", async interaction => {
     guildChannels[guildId] = channel.id;
     sentDeals[guildId] = new Set();
 
-    await interaction.reply("✅ Deal channel saved. Sending 70%+ quality deals now...");
+    await interaction.reply("✅ Channel saved. Sending 70%+ Steam deals now...");
 
     await sendDealsForGuild(guildId);
   }
@@ -92,10 +92,9 @@ async function refreshAllGuilds() {
     try {
       const channel = await client.channels.fetch(channelId);
 
-      // Clear last 100 messages
       await channel.bulkDelete(100).catch(() => {});
 
-      sentDeals[guildId] = new Set(); // reset duplicates
+      sentDeals[guildId] = new Set(); // reset duplicate memory
       await sendDealsForGuild(guildId);
 
     } catch (err) {
@@ -109,51 +108,42 @@ async function sendDealsForGuild(guildId) {
   if (!channelId) return;
 
   try {
-    const res = await axios.get(
-      "https://store.steampowered.com/api/featuredcategories/"
-    );
-
-    const deals = res.data.specials.items
-      .sort((a, b) => b.discount_percent - a.discount_percent);
-
     const channel = await client.channels.fetch(channelId);
     if (!channel) return;
 
+    // Steam Search API (no featuredcategories)
+    const res = await axios.get(
+      "https://store.steampowered.com/api/storesearch/?term=&l=english&cc=US"
+    );
+
+    const games = res.data.items;
+
+    if (!games || !games.length) return;
+
+    // Sort highest discount first
+    games.sort((a, b) => b.discount_percent - a.discount_percent);
+
     let count = 0;
 
-    for (let game of deals) {
+    for (let game of games) {
 
-      if (count >= 100) break;
+      if (count >= 10) break;
 
       const discount = game.discount_percent;
 
-      // ✅ ONLY 70%–100%
+      // Only 70%–100%
       if (discount < 70) continue;
 
-      // Duplicate protection
       if (sentDeals[guildId] && sentDeals[guildId].has(game.id)) continue;
 
-      // Fetch detailed info
-      const detailRes = await axios.get(
-        `https://store.steampowered.com/api/appdetails?appids=${game.id}`
-      );
-
-      const appData = detailRes.data[game.id];
-      if (!appData.success) continue;
-
-      const data = appData.data;
-
-      // ✅ QUALITY FILTER (Metacritic ≥ 70 if exists)
-      if (data.metacritic && data.metacritic.score < 70) continue;
-
-      const original = (game.original_price / 100).toFixed(2);
-      const final = (game.final_price / 100).toFixed(2);
+      const original = (game.price.initial / 100).toFixed(2);
+      const final = (game.price.final / 100).toFixed(2);
       const inr = Math.round(final * 83);
 
       const embed = new EmbedBuilder()
         .setTitle(`🔥 ${game.name}`)
         .setURL(`https://store.steampowered.com/app/${game.id}`)
-        .setImage(game.header_image)
+        .setImage(game.tiny_image)
         .addFields(
           { name: "Discount", value: `${discount}%`, inline: true },
           { name: "Original Price", value: `$${original}`, inline: true },
@@ -161,13 +151,9 @@ async function sendDealsForGuild(guildId) {
           { name: "INR", value: `₹${inr}`, inline: true }
         )
         .setColor(discount >= 90 ? 0xff0000 : 0x00AEFF)
-        .setFooter({ text: "Steam 70%+ Quality Deals Only" });
+        .setFooter({ text: "Steam 70%+ Deals (Search API)" });
 
       await channel.send({ embeds: [embed] });
-
-      if (!sentDeals[guildId]) {
-        sentDeals[guildId] = new Set();
-      }
 
       sentDeals[guildId].add(game.id);
       count++;
