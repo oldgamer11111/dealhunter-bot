@@ -1,6 +1,6 @@
-const { 
-  Client, 
-  GatewayIntentBits, 
+const {
+  Client,
+  GatewayIntentBits,
   EmbedBuilder,
   SlashCommandBuilder,
   REST,
@@ -16,48 +16,41 @@ const client = new Client({
 
 const TOKEN = process.env.TOKEN;
 
-/* ============================= */
-/*         MEMORY STORE          */
-/* ============================= */
+/* ================= MEMORY ================= */
 
-let guildConfig = {}; 
-// { guildId: { channelId, category } }
+let guildConfig = {};     // { guildId: { channelId, category } }
+let sentDeals = {};       // { guildId: { appId: timestamp } }
+let dailyTracker = {};    // { guildId: [ {name, discount} ] }
 
-let sentDeals = {}; 
-// { guildId: { appId: timestamp } }
-
-let dailyTracker = {}; 
-// { guildId: [ {name, discount} ] }
-
-/* ============================= */
+/* ================= COMMANDS ================= */
 
 const commands = [
   new SlashCommandBuilder()
     .setName("setup")
-    .setDescription("Set deal channel")
+    .setDescription("Set the channel for Steam deals")
     .addChannelOption(o =>
       o.setName("channel")
-        .setDescription("Channel for deals")
+        .setDescription("Channel to send deals")
         .setRequired(true)
     )
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 
   new SlashCommandBuilder()
     .setName("setcategory")
-    .setDescription("Set category filter (rpg, action, strategy)")
+    .setDescription("Filter by category (rpg, action, strategy etc.)")
     .addStringOption(o =>
       o.setName("type")
-        .setDescription("Category")
+        .setDescription("Category name")
         .setRequired(true)
     )
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
 
 ].map(c => c.toJSON());
 
-/* ============================= */
+/* ================= READY ================= */
 
 client.once("ready", async () => {
-  console.log("Steam Pro Multi-Server Bot Online");
+  console.log("Steam Multi-Server Bot Online");
 
   const rest = new REST({ version: "10" }).setToken(TOKEN);
   await rest.put(
@@ -65,11 +58,11 @@ client.once("ready", async () => {
     { body: commands }
   );
 
-  setInterval(checkDealsAllGuilds, 3600000);
-  setInterval(sendDailySummary, 86400000);
+  setInterval(checkAllGuilds, 3600000); // 1 hour
+  setInterval(sendDailySummary, 86400000); // 24 hours
 });
 
-/* ============================= */
+/* ================= INTERACTION ================= */
 
 client.on("interactionCreate", async interaction => {
   if (!interaction.isChatInputCommand()) return;
@@ -78,24 +71,26 @@ client.on("interactionCreate", async interaction => {
 
   if (interaction.commandName === "setup") {
     const channel = interaction.options.getChannel("channel");
+
     guildConfig[guildId] = guildConfig[guildId] || {};
     guildConfig[guildId].channelId = channel.id;
 
-    await interaction.reply("✅ Deal channel set.");
+    await interaction.reply("✅ Deal channel set successfully.");
   }
 
   if (interaction.commandName === "setcategory") {
     const type = interaction.options.getString("type").toLowerCase();
+
     guildConfig[guildId] = guildConfig[guildId] || {};
     guildConfig[guildId].category = type;
 
-    await interaction.reply(`✅ Category set to ${type}`);
+    await interaction.reply(`✅ Category filter set to "${type}"`);
   }
 });
 
-/* ============================= */
+/* ================= MAIN LOGIC ================= */
 
-async function checkDealsAllGuilds() {
+async function checkAllGuilds() {
   for (let guildId of Object.keys(guildConfig)) {
     await sendDealsForGuild(guildId);
   }
@@ -106,11 +101,11 @@ async function sendDealsForGuild(guildId) {
   if (!config || !config.channelId) return;
 
   try {
-    const res = await axios.get(
+    const featured = await axios.get(
       "https://store.steampowered.com/api/featuredcategories/"
     );
 
-    const specials = res.data.specials.items
+    const deals = featured.data.specials.items
       .sort((a, b) => b.discount_percent - a.discount_percent)
       .slice(0, 10);
 
@@ -120,18 +115,23 @@ async function sendDealsForGuild(guildId) {
     sentDeals[guildId] = sentDeals[guildId] || {};
     dailyTracker[guildId] = dailyTracker[guildId] || [];
 
-    for (let game of specials) {
+    for (let game of deals) {
 
       const now = Date.now();
       const lastSent = sentDeals[guildId][game.id];
 
-      if (lastSent && now - lastSent < 86400000) continue; // 24h duplicate protection
+      if (lastSent && now - lastSent < 86400000) continue; // 24h duplicate
 
-      const details = await axios.get(
+      // Fetch detailed info
+      const detailRes = await axios.get(
         `https://store.steampowered.com/api/appdetails?appids=${game.id}`
       );
 
-      const data = details.data[game.id].data;
+      const appData = detailRes.data[game.id];
+
+      if (!appData.success) continue;
+
+      const data = appData.data;
 
       // CATEGORY FILTER
       if (config.category && data.genres) {
@@ -145,8 +145,14 @@ async function sendDealsForGuild(guildId) {
       const original = (game.original_price / 100).toFixed(2);
       const final = (game.final_price / 100).toFixed(2);
 
-      const reviewPercent = data.review_score || 0;
-      const reviewText = data.review_score_desc || "Unknown";
+      // REVIEW INFO
+      let reviewPercent = 0;
+      let reviewText = "No reviews";
+
+      if (data.recommendations && data.metacritic) {
+        reviewPercent = data.metacritic.score;
+        reviewText = "Metacritic";
+      }
 
       const ratingBar = generateBar(reviewPercent);
 
@@ -158,8 +164,8 @@ async function sendDealsForGuild(guildId) {
           { name: "Discount", value: `${discount}%`, inline: true },
           { name: "Original", value: `$${original}`, inline: true },
           { name: "Now", value: `$${final}`, inline: true },
-          { name: "Review", value: `${reviewText} (${reviewPercent}%)` },
-          { name: "Rating", value: ratingBar }
+          { name: "Rating", value: `${reviewText} (${reviewPercent})` },
+          { name: "Visual", value: ratingBar }
         )
         .setColor(discount >= 90 ? 0xff0000 : 0x00AEFF);
 
@@ -173,18 +179,20 @@ async function sendDealsForGuild(guildId) {
     }
 
   } catch (err) {
-    console.error(err);
+    console.error("ERROR:", err.message);
   }
 }
 
-/* ============================= */
+/* ================= DAILY SUMMARY ================= */
 
 async function sendDailySummary() {
   for (let guildId of Object.keys(dailyTracker)) {
+
     const config = guildConfig[guildId];
     if (!config || !config.channelId) continue;
 
     const channel = await client.channels.fetch(config.channelId);
+    if (!channel) continue;
 
     const top5 = dailyTracker[guildId]
       .sort((a, b) => b.discount - a.discount)
@@ -192,19 +200,19 @@ async function sendDailySummary() {
 
     if (!top5.length) continue;
 
-    let text = "📊 **Daily Top 5 Steam Deals**\n\n";
+    let summary = "📊 **Daily Top 5 Steam Deals**\n\n";
 
     top5.forEach((g, i) => {
-      text += `#${i+1} ${g.name} - ${g.discount}% OFF\n`;
+      summary += `#${i + 1} ${g.name} - ${g.discount}% OFF\n`;
     });
 
-    await channel.send(text);
+    await channel.send(summary);
 
     dailyTracker[guildId] = [];
   }
 }
 
-/* ============================= */
+/* ================= HELPER ================= */
 
 function generateBar(percent) {
   const total = 10;
@@ -212,6 +220,6 @@ function generateBar(percent) {
   return "█".repeat(filled) + "░".repeat(total - filled);
 }
 
-/* ============================= */
+/* ================= START ================= */
 
 client.login(TOKEN);
