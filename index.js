@@ -54,10 +54,12 @@ client.once("ready", async () => {
 
   const rest = new REST({ version: "10" }).setToken(TOKEN);
   await rest.put(
-    Routes.applicationCommands(client.user.id),
-    { body: commands }
-  );
-
+  Routes.applicationGuildCommands(
+    client.user.id,
+    "1320275989011632213"
+  ),
+  { body: commands }
+);
   setInterval(checkAllGuilds, 3600000); // 1 hour
   setInterval(sendDailySummary, 86400000); // 24 hours
 });
