@@ -23,9 +23,9 @@ const STORES = {
 
 // Custom minimum discount per platform
 const MIN_DISCOUNT = {
-  steam: 70,
-  ps: 60,
-  xbox: 50
+  steam: 80,
+  ps: 80,
+  xbox: 80
 };
 
 // Role ping for 90%+
