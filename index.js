@@ -7,137 +7,78 @@ const client = new Client({
 
 const TOKEN = process.env.TOKEN;
 
-/* ====== CONFIG ====== */
+const STEAM_CHANNEL = "1477620193252474961";
+const MEGA_ROLE_ID = "1322568416413880352";
 
-const CHANNELS = {
-  steam: "1320282654209478666",
-  ps: "1320275990290890826",
-  xbox: "1320275990290890827"
-};
-
-const STORES = {
-  steam: 1,
-  ps: 7,
-  xbox: 25
-};
-
-// Custom minimum discount per platform
-const MIN_DISCOUNT = {
-  steam: 80,
-  ps: 80,
-  xbox: 80
-};
-
-// Role ping for 90%+
-const MEGA_ROLE_ID = "PUT_ROLE_ID";
-
-/* ===================== */
-
-let sentDeals = new Set();
-let trendingMap = {};
-let dailyTopDeals = [];
+let sentApps = new Set();
 
 client.once("ready", async () => {
-  console.log("Smart Bot Online");
+  console.log("Steam Pro Tracker Online");
 
-  await sendAllDeals();
-
-  setInterval(sendAllDeals, 3600000); // 1 hour
-  setInterval(sendDailySummary, 86400000); // 24 hours
+  await sendSteamDeals();
+  setInterval(sendSteamDeals, 3600000);
 });
 
-function generateBar(percent) {
-  const total = 10;
-  const filled = Math.round((percent / 100) * total);
-  return "█".repeat(filled) + "░".repeat(total - filled);
-}
-
-async function sendAllDeals() {
-  dailyTopDeals = [];
-
-  for (let platform of Object.keys(CHANNELS)) {
-    await sendDeals(platform);
-  }
-}
-
-async function sendDeals(platform) {
+async function sendSteamDeals() {
   try {
-    const response = await axios.get(
-      `https://www.cheapshark.com/api/1.0/deals?storeID=${STORES[platform]}`
+    const res = await axios.get(
+      "https://store.steampowered.com/api/featuredcategories/"
     );
 
-    const channel = await client.channels.fetch(CHANNELS[platform]);
-    if (!channel) return;
-
-    const deals = response.data
-      .filter(g => parseFloat(g.savings) >= MIN_DISCOUNT[platform])
-      .sort((a, b) => parseFloat(b.savings) - parseFloat(a.savings))
+    const specials = res.data.specials.items
+      .sort((a, b) => b.discount_percent - a.discount_percent)
       .slice(0, 10);
+
+    const channel = await client.channels.fetch(STEAM_CHANNEL);
 
     let rank = 1;
 
-    for (let game of deals) {
-      if (sentDeals.has(game.dealID)) continue;
+    for (let game of specials) {
+      if (sentApps.has(game.id)) continue;
+      sentApps.add(game.id);
 
-      sentDeals.add(game.dealID);
+      const discount = game.discount_percent;
+      const original = (game.original_price / 100).toFixed(2);
+      const final = (game.final_price / 100).toFixed(2);
+      const inr = Math.round(final * 83);
 
-      const discount = parseFloat(game.savings);
-      const usd = parseFloat(game.salePrice);
-      const inr = Math.round(usd * 83);
+      // Fetch detailed info
+      const details = await axios.get(
+        `https://store.steampowered.com/api/appdetails?appids=${game.id}`
+      );
 
-      // Trending logic
-      trendingMap[game.title] = (trendingMap[game.title] || 0) + 1;
-      const isTrending = trendingMap[game.title] >= 2;
+      const data = details.data[game.id].data;
+
+      const rating = data.metacritic ? data.metacritic.score : "N/A";
+      const reviews = data.recommendations
+        ? data.recommendations.total.toLocaleString()
+        : "N/A";
 
       const embed = new EmbedBuilder()
-        .setTitle(`#${rank} 🔥 ${game.title}`)
-        .setURL(`https://www.cheapshark.com/redirect?dealID=${game.dealID}`)
-        .setThumbnail(game.thumb)
+        .setTitle(`#${rank} 🔥 ${game.name}`)
+        .setURL(`https://store.steampowered.com/app/${game.id}`)
+        .setImage(game.header_image)
         .addFields(
-          { name: "Platform", value: platform.toUpperCase(), inline: true },
           { name: "Discount", value: `${discount}%`, inline: true },
-          { name: "Visual", value: `${generateBar(discount)} ${discount}%` },
-          { name: "USD", value: `$${usd}`, inline: true },
-          { name: "INR", value: `₹${inr}`, inline: true }
+          { name: "Original", value: `$${original}`, inline: true },
+          { name: "Now", value: `$${final}`, inline: true },
+          { name: "INR", value: `₹${inr}`, inline: true },
+          { name: "Metacritic", value: `${rating}`, inline: true },
+          { name: "Total Reviews", value: `${reviews}`, inline: true }
         )
         .setColor(discount >= 90 ? 0xff0000 : 0x00AEFF)
-        .setFooter({
-          text: isTrending ? "🔥 TRENDING DEAL" : "Smart Deal Tracker"
-        });
+        .setFooter({ text: "Steam Professional Deal Tracker" });
 
       if (discount >= 90) {
-        await channel.send(`<@&${MEGA_ROLE_ID}> 🚨 90%+ MEGA DEAL!`);
+        await channel.send(`<@&${MEGA_ROLE_ID}> 🚨 90% MEGA DEAL`);
       }
 
       await channel.send({ embeds: [embed] });
 
-      dailyTopDeals.push({ title: game.title, discount });
-
       rank++;
     }
-
   } catch (err) {
     console.error(err);
-  }
-}
-
-async function sendDailySummary() {
-  if (!dailyTopDeals.length) return;
-
-  for (let platform of Object.keys(CHANNELS)) {
-    const channel = await client.channels.fetch(CHANNELS[platform]);
-    if (!channel) continue;
-
-    const top5 = dailyTopDeals
-      .sort((a, b) => b.discount - a.discount)
-      .slice(0, 5);
-
-    let summary = "📊 **Daily Top 5 Deals**\n\n";
-    top5.forEach((g, i) => {
-      summary += `#${i + 1} ${g.title} - ${g.discount}% OFF\n`;
-    });
-
-    await channel.send(summary);
   }
 }
 
