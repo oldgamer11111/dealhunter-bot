@@ -10,9 +10,9 @@ const TOKEN = process.env.TOKEN;
 /* ====== CONFIG ====== */
 
 const CHANNELS = {
-  steam: "PUT_STEAM_CHANNEL_ID",
-  ps: "PUT_PS_CHANNEL_ID",
-  xbox: "PUT_XBOX_CHANNEL_ID"
+  steam: "1320282654209478666",
+  ps: "1320275990290890826",
+  xbox: "1320275990290890827"
 };
 
 const STORES = {
